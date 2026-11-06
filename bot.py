@@ -15,7 +15,6 @@ def home():
     return "Bot is running!"
 
 def run_web_server():
-    # Renderは環境変数 PORT を指定してくるため、それを読み込む（デフォルトは8080）
     port = int(os.environ.get("PORT", 8080))
     app.run(host='0.0.0.0', port=port)
 
@@ -25,9 +24,9 @@ def keep_alive():
 # ------------------------------------------------
 
 # --- 設定項目 ---
-# 💡 セキュリティのため、トークンはRenderの設定画面（環境変数）から読み込みます
 TOKEN = os.environ.get("DISCORD_TOKEN")
-FILE_PATH = 'todo_data.json'
+# 💡 データを保存する専用チャンネルのIDを設定
+DATA_CHANNEL_ID = 1568303101797208104
 # ----------------
 
 class MyBot(commands.Bot):
@@ -43,26 +42,56 @@ bot = MyBot()
 todo_list = []
 last_msg_id = None
 
-def save_data():
-    data = {"todo_list": todo_list, "last_msg_id": last_msg_id}
-    with open(FILE_PATH, 'w', encoding='utf-8') as f:
-        json.dump(data, f, ensure_ascii=False, indent=4)
+async def save_data():
+    """データを指定されたDiscordチャンネルにメッセージとして保存する"""
+    channel = bot.get_channel(DATA_CHANNEL_ID)
+    if not channel:
+        print("警告: データ保存用チャンネルが見つかりません。")
+        return
+    
+    # 過去の保存ログを削除して最新のものだけにする
+    async for message in channel.history(limit=10):
+        if message.author == bot.user:
+            try:
+                await message.delete()
+            except:
+                pass
 
-def load_data():
+    data = {"todo_list": todo_list, "last_msg_id": last_msg_id}
+    json_data = json.dumps(data, ensure_ascii=False, indent=4)
+    
+    # 2000文字を超える場合はコードブロックを分割（通常用途ならこれで十分収まります）
+    await channel.send(f"```json\n{json_data}\n```")
+
+async def load_data():
+    """Discordチャンネルの最新メッセージからデータを復元する"""
     global todo_list, last_msg_id
-    if os.path.exists(FILE_PATH):
-        with open(FILE_PATH, 'r', encoding='utf-8') as f:
-            data = json.load(f)
-            if isinstance(data, list):
-                todo_list = data
-                last_msg_id = None
-            else:
-                todo_list = data.get("todo_list", [])
-                last_msg_id = data.get("last_msg_id")
+    channel = bot.get_channel(DATA_CHANNEL_ID)
+    if not channel:
+        print("警告: データ読み込み用チャンネルが見つかりません。")
+        return
+
+    async for message in channel.history(limit=10):
+        if message.author == bot.user and message.content.startswith("```json"):
+            try:
+                # ```json と ``` を取り除いてパース
+                raw_content = message.content.strip("`").replace("json\n", "", 1)
+                data = json.loads(raw_content)
+                if isinstance(data, list):
+                    todo_list = data
+                    last_msg_id = None
+                else:
+                    todo_list = data.get("todo_list", [])
+                    last_msg_id = data.get("last_msg_id")
+                print("Discordからデータを正常に復元しました。")
+                return
+            except Exception as e:
+                print(f"データ復元失敗: {e}")
+    print("過去の保存データが見つかりませんでした。新規作成します。")
 
 @bot.event
 async def on_ready():
-    load_data()
+    await load_data()
     print(f'ログインしました: {bot.user.name}')
 
 async def delete_last_message(interaction: discord.Interaction):
@@ -115,12 +144,16 @@ def create_todo_text():
 
 async def send_refresh_list(interaction: discord.Interaction, notice_text: str = ""):
     global last_msg_id
+    # 💡 応答エラー対策：時間のかかる処理（削除や保存）より先に、最優先でdeferを実行して時間を確保
     await interaction.response.defer()
+    
     await delete_last_message(interaction)
     full_text = f"{notice_text}\n\n{create_todo_text()}" if notice_text else create_todo_text()
     new_msg = await interaction.followup.send(full_text)
     last_msg_id = new_msg.id
-    save_data()
+    
+    # 💡 データの保存処理を最後に実行
+    await save_data()
 
 # --- スラッシュコマンド ---
 
@@ -185,8 +218,5 @@ async def done(interaction: discord.Interaction, index: int):
     else:
         await interaction.response.send_message("番号が見つかりません。", ephemeral=True)
 
-# 💡 WEBサーバーをバックグラウンドで起動
 keep_alive()
-
-# 💡 Botの起動
 bot.run(TOKEN)
